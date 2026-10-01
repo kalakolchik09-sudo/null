@@ -1,9 +1,10 @@
 # main.py
 # ============================================================
 # Telegram-рассыльщик для Railway (монолитный)
-# - Telethon userbot: рассылка с вашего аккаунта
+# - Telethon userbot: рассылка с вашего аккаунта (сессия в Volume)
 # - aiogram: админ-панель + активация ключей
-# - SQLite на Volume (/data) + HTTP healthcheck для Railway
+# - SQLite в Volume (/data)
+# - HTTP healthcheck для Railway
 # ============================================================
 
 import asyncio
@@ -11,6 +12,7 @@ import logging
 import os
 import random
 import secrets
+import shutil
 import string
 from datetime import datetime, timedelta
 
@@ -28,28 +30,34 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 from telethon import TelegramClient
-from telethon.sessions import StringSession
 
 # ============================================================
 # КОНФИГ (из переменных Railway)
 # ============================================================
 TG_API_ID = int(os.environ["TG_API_ID"])
 TG_API_HASH = os.environ["TG_API_HASH"]
-TG_SESSION_STRING = os.environ["TG_SESSION_STRING"]
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 
+# Файл сессии Telethon. Telethon сам добавит ".session".
+# На Railway /data — это точка монтирования Volume.
+SESSION_PATH = os.environ.get("SESSION_PATH", "/data/sender")
+
+# Файл базы данных — тоже в Volume
 DB_PATH = os.environ.get("DB_PATH", "/data/data.db")
 
-# Лимиты безопасности
+# Лимиты безопасности рассылки
 MAX_MESSAGES_PER_HOUR = int(os.environ.get("MAX_MESSAGES_PER_HOUR", "20"))
 MIN_INTERVAL_SECONDS = int(os.environ.get("MIN_INTERVAL_SECONDS", "60"))
 
 # Допустимые сроки ключей
 ALLOWED_KEY_DAYS = {1, 2, 3, 4, 30, 360, -1}
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 logger = logging.getLogger("sender")
 
 
@@ -241,7 +249,6 @@ async def start_sender(mode: str, messages: list[str], interval: int, targets: l
     if interval < MIN_INTERVAL_SECONDS:
         return f"Интервал меньше минимального ({MIN_INTERVAL_SECONDS}с)."
 
-    # Проверка лимита сообщений/час
     msgs_per_hour = 3600 / interval
     if msgs_per_hour > MAX_MESSAGES_PER_HOUR:
         return f"Слишком быстро: {msgs_per_hour:.1f}/час > лимита {MAX_MESSAGES_PER_HOUR}/час."
@@ -462,7 +469,7 @@ async def cb_simple(call: CallbackQuery, state: FSMContext):
 async def admin_simple_text(msg: Message, state: FSMContext):
     await state.update_data(text=msg.text)
     await state.set_state(AdminStates.simple_interval)
-    await msg.answer("Интервал между сообщениями в секундах (мин. {}):".format(MIN_INTERVAL_SECONDS))
+    await msg.answer(f"Интервал между сообщениями в секундах (мин. {MIN_INTERVAL_SECONDS}):")
 
 
 @dp.message(AdminStates.simple_interval)
@@ -596,17 +603,49 @@ async def start_http_server():
 
 
 # ============================================================
+# ПОДГОТОВКА ФАЙЛА СЕССИИ
+# ============================================================
+def prepare_session_file():
+    """
+    Убеждаемся, что файл сессии лежит там, где его ждёт Telethon.
+    1. Если файл уже в Volume (/data/sender.session) — используем его.
+    2. Иначе — если в корне репозитория есть sender.session (залили через git),
+       копируем его в Volume.
+    3. Иначе — падаем с понятной ошибкой.
+    """
+    target = SESSION_PATH + ".session"
+    os.makedirs(os.path.dirname(SESSION_PATH), exist_ok=True)
+
+    if os.path.exists(target):
+        logger.info(f"Session file found at {target}")
+        return
+
+    fallback = "sender.session"  # файл в корне репозитория
+    if os.path.exists(fallback):
+        shutil.copy(fallback, target)
+        logger.info(f"Session copied from repo ({fallback}) to {target}")
+        return
+
+    logger.error(
+        "Файл сессии %s не найден и нет sender.session в репозитории. "
+        "Сгенерируйте его локально и положите либо в Volume, либо в корень репо.",
+        target,
+    )
+    raise SystemExit(1)
+
+
+# ============================================================
 # ЗАПУСК
 # ============================================================
 async def main():
     global tg_client
 
-    await init_db()
-    logger.info("DB ready")
+    prepare_session_file()
 
-    tg_client = TelegramClient(
-        StringSession(TG_SESSION_STRING), TG_API_ID, TG_API_HASH
-    )
+    await init_db()
+    logger.info(f"DB ready at {DB_PATH}")
+
+    tg_client = TelegramClient(SESSION_PATH, TG_API_ID, TG_API_HASH)
     await tg_client.start()
     me = await tg_client.get_me()
     logger.info(f"Telethon started as @{me.username or me.id}")
