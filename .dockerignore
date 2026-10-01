@@ -1,9 +1,0 @@
-.git
-.env
-.gitignore
-__pycache__
-*.pyc
-.venv
-venv
-bot.db
-*.log
