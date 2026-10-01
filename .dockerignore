@@ -1,9 +1,9 @@
 .git
-.gitignore
 .env
-.venv
-venv
+.gitignore
 __pycache__
 *.pyc
+.venv
+venv
+bot.db
 *.log
-README.md
